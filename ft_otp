@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+
+# imports
+import argparse
+from pathlib import Path
+import string
+from cryptography.fernet import Fernet, InvalidToken
+import time
+import hashlib
+import hmac
+import sys
+
+# -k: start the process: checkers and generator
+def load_secret(files):
+    key_path = Path(files)
+    encryption_key_path = key_path.with_name(".fernet")
+
+    try:
+        encryption_key = encryption_key_path.read_bytes()
+        encryption_secret = key_path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"Could not read key files: {error}") from error
+
+    try:
+        return Fernet(encryption_key).decrypt(encryption_secret)
+    except (InvalidToken, ValueError) as error:
+        raise ValueError("Could not decrypt key file; check the key files") from error
+
+def load_counter():
+    counter = int(time.time()) // 30
+    return counter.to_bytes(8, byteorder="big")
+
+def generate_otp(files):
+    secret = load_secret(files)
+    counter = load_counter()
+    digest = hmac.new(secret, counter, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    binary_code = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    otp = binary_code % 1_000_000
+    print(f"{otp:06d}")
+
+# -g: validation, encryptation and file creation
+def is_valid_hex_key(text):
+    return (
+        len(text) >= 64
+        and len(text) % 2 == 0
+        and all(char in string.hexdigits for char in text)
+    )
+
+def load_hex(files):
+    try:
+        hex_text = Path(files).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"Could not read key file: {error}") from error
+    if not is_valid_hex_key(hex_text):
+        raise ValueError("key must contain at least 64 hexadecimal characters")
+    return hex_text
+
+def generate_key(files):
+    hex = load_hex(files)
+    secret = bytes.fromhex(hex)
+    encryption_key = Fernet.generate_key()
+    encrypted_secret = Fernet(encryption_key).encrypt(secret)
+    Path(".fernet").write_bytes(encryption_key)
+    Path("ft_otp.key").write_bytes(encrypted_secret)
+    print("Key was successfully saved in ft_otp.key.")
+    
+# parsing arguments
+def parse_args():
+    parser = argparse.ArgumentParser(prog="ft_otp")
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument(
+        "-g",
+        action="store_true",
+        help="Encrypt and store .hex key",
+    )
+    operation.add_argument(
+        "-k",
+        action="store_true",
+        help="Generate a temporary password",
+    )
+    parser.add_argument(
+        "files",
+        help=".hex file for -g, or .key file for -k",
+    )
+    return parser.parse_args()
+
+# main function
+def otp_router(args):
+    if args.g:
+        generate_key(args.files)
+    elif args.k:
+        generate_otp(args.files)
+
+def main():
+    args = parse_args()
+    try:
+        otp_router(args)
+    except (OSError, ValueError) as error:
+        print(f"ft_otp: error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
